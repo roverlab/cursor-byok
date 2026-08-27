@@ -144,7 +144,12 @@ tasks:
       - rm -rf "{{.STAGING_DIR}}"
       - mkdir -p "{{.STAGING_DIR}}"
       - cp "{{.OUTPUT}}" "{{.STAGING_DIR}}/"
-      - (cd "{{.STAGING_DIR}}" && zip -qry "../{{.ZIP_NAME}}" .)
+      - |
+        {{if eq OS "windows"}}
+        powershell -Command "Compress-Archive -Path '{{.STAGING_DIR}}\*' -DestinationPath '{{.BIN_DIR}}\{{.ZIP_NAME}}' -Force"
+        {{else}}
+        (cd "{{.STAGING_DIR}}" && zip -qry "../{{.ZIP_NAME}}" .)
+        {{end}}
       - rm -rf "{{.STAGING_DIR}}"
       - rm -f "{{.OUTPUT}}"
 
