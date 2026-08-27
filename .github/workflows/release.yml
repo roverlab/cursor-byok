@@ -170,8 +170,11 @@ jobs:
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
-          task release:ensure:dir
-          task release:notes
+          mkdir -p "bin/release/${VERSION}"
+          go run ./scripts/release notes \
+            -config ./build/config.yml \
+            -out "bin/release/${VERSION}/.release-notes.md" \
+            -source ./release-notes.md
           task ${{ matrix.task }}
           test -f "bin/release/${VERSION}/${{ matrix.asset }}"
 
