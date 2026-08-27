@@ -1,0 +1,242 @@
+name: Release desktop app
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: desktop-release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Prepare release
+    runs-on: ubuntu-latest
+    outputs:
+      should_publish: ${{ steps.release.outputs.should_publish }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify release author
+        env:
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+        shell: bash
+        run: |
+          if [[ "${GITHUB_ACTOR}" != "${REPOSITORY_OWNER}" ]]; then
+            echo "Only ${REPOSITORY_OWNER} may publish a release" >&2
+            exit 1
+          fi
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Read and verify app version
+        id: version
+        shell: bash
+        run: |
+          version=$(go run ./scripts/release version -config ./build/config.yml)
+          windows_version=$(node -p "require('./build/windows/info.json').info['0000'].ProductVersion")
+          nfpm_version=$(node -p "require('fs').readFileSync('build/linux/nfpm/nfpm.yaml','utf8').match(/^version:\\s*\"([^\"]+)\"/m)[1]")
+          test -n "${version}"
+          test "${version}" = "${windows_version}"
+          test "${version}" = "${nfpm_version}"
+          test "${GITHUB_REF_TYPE}" = "tag"
+          test "${GITHUB_REF_NAME}" = "v${version}"
+          git fetch origin main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "${GITHUB_SHA}" origin/main; then
+            echo "Release tag must point to a commit contained in origin/main" >&2
+            exit 1
+          fi
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Check whether this version is already published
+        id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+        shell: bash
+        run: |
+          state=$(gh release view "v${VERSION}" --json isDraft --jq 'if .isDraft then "draft" else "published" end' 2>/dev/null || true)
+          if [[ "${state}" = "published" ]]; then
+            echo "Version ${VERSION} is already published; nothing to do."
+            echo "should_publish=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          echo "should_publish=true" >> "${GITHUB_OUTPUT}"
+          if [[ "${state}" = "draft" ]]; then
+            echo "Reusing existing draft release v${VERSION}"
+            exit 0
+          fi
+          notes="Download the installer for your platform from the assets below."
+          if [[ "${VERSION}" == *-* ]]; then
+            notes="Beta release. ${notes}"
+          fi
+          gh release create "v${VERSION}" \
+            --draft \
+            --title "Cursor BYOK v${VERSION}" \
+            --notes "${notes}"
+
+  publish:
+    name: Publish (${{ matrix.platform }})
+    needs: prepare
+    if: needs.prepare.outputs.should_publish == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64
+            os: ubuntu-22.04
+            task: release:build:linux:amd64
+            asset: cursor-byok-${{ needs.prepare.outputs.version }}-linux-amd64.tar.gz
+          - platform: windows-x86_64
+            os: windows-latest
+            task: release:build:windows:amd64
+            asset: cursor-byok-${{ needs.prepare.outputs.version }}-windows-amd64.zip
+          - platform: macos-aarch64
+            os: macos-15
+            task: release:build:macos:arm64
+            asset: cursor-byok-${{ needs.prepare.outputs.version }}-macos-arm64.tar.gz
+          - platform: macos-x86_64
+            os: macos-15-intel
+            task: release:build:macos:amd64
+            asset: cursor-byok-${{ needs.prepare.outputs.version }}-macos-amd64.tar.gz
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add Git usr/bin to PATH
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Add-Content -Path $env:GITHUB_PATH -Value "$env:ProgramFiles\Git\usr\bin"
+
+      - name: Install Linux system dependencies
+        if: matrix.platform == 'linux-x86_64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc \
+            pkg-config \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: yarn
+          cache-dependency-path: frontend/yarn.lock
+
+      - uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Enable Yarn Classic
+        shell: bash
+        run: |
+          corepack enable
+          corepack prepare yarn@1.22.22 --activate
+
+      - name: Install Go tooling
+        shell: bash
+        run: |
+          go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-alpha.74
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+          go install connectrpc.com/connect/cmd/protoc-gen-connect-go@v1.19.1
+          echo "$(go env GOPATH)/bin" >> "${GITHUB_PATH}"
+
+      - name: Build release asset
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          task release:ensure:dir
+          task release:notes
+          task ${{ matrix.task }}
+          test -f "bin/release/${VERSION}/${{ matrix.asset }}"
+
+      - name: Upload release asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        shell: bash
+        run: gh release upload "v${VERSION}" "bin/release/${VERSION}/${{ matrix.asset }}" --clobber
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-asset-${{ matrix.platform }}
+          path: bin/release/${{ needs.prepare.outputs.version }}/${{ matrix.asset }}
+          if-no-files-found: error
+
+  finalize:
+    name: Publish GitHub Release
+    needs: [prepare, publish]
+    if: needs.prepare.outputs.should_publish == 'true' && needs.publish.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-asset-*
+          path: bin/release/${{ needs.prepare.outputs.version }}
+          merge-multiple: true
+
+      - name: Generate updater manifest
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          mkdir -p "bin/release/${VERSION}"
+          go run ./scripts/release notes \
+            -config ./build/config.yml \
+            -out "bin/release/${VERSION}/.release-notes.md" \
+            -source ./release-notes.md
+          go run ./scripts/release manifest \
+            -config ./build/config.yml \
+            -assets-dir "bin/release/${VERSION}" \
+            -out "bin/release/${VERSION}/update.json" \
+            -repo "${GITHUB_REPOSITORY}" \
+            -base-name cursor-byok \
+            -notes "bin/release/${VERSION}/.release-notes.md"
+
+      - name: Upload updater manifest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: gh release upload "v${VERSION}" "bin/release/${VERSION}/update.json" --clobber
+
+      - name: Publish the completed release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          notes_file="bin/release/${VERSION}/.release-notes.md"
+          gh release edit "v${VERSION}" \
+            --draft=false \
+            --latest \
+            --notes-file "${notes_file}"
