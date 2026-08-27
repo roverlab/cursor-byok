@@ -107,30 +107,22 @@ func (m *Manager) checkNow(manual bool) {
 	}
 
 	m.mu.Lock()
-	switch m.state {
-	case StateReady:
-		info := m.readyInfo
-		m.mu.Unlock()
-		m.emitReady(info, true)
-		return
-	case StateChecking, StateDownloading, StateInstalling:
-		state := m.state
-		info := m.currentInfo
+	if m.state == StateChecking {
 		m.mu.Unlock()
 		if manual {
-			m.emitState(state, info, "", fmt.Sprintf("当前正在%s，请稍后再试。", stateLabel(state)), true, "idle")
+			m.emitState(m.state, m.currentInfo, "", "当前正在检查更新，请稍后再试。", true, "idle")
 		}
 		return
-	default:
-		m.state = StateChecking
-		m.currentInfo = nil
-		m.readyInfo = nil
-		m.downloadedPath = ""
-		m.mu.Unlock()
 	}
+	m.state = StateChecking
+	m.currentInfo = nil
+	m.readyInfo = nil
+	m.downloadedPath = ""
+	m.mu.Unlock()
+
 	m.emitState(StateChecking, nil, "", "", false, "")
 
-	ctx, cancel := context.WithTimeout(m.ctx, 90*time.Second)
+	ctx, cancel := context.WithTimeout(m.ctx, 30*time.Second)
 	defer cancel()
 
 	info, err := m.fetchUpdateInfo(ctx)
@@ -147,19 +139,7 @@ func (m *Manager) checkNow(manual bool) {
 	}
 
 	logger.Infof("发现新版本：current=%s latest=%s platform=%s", buildinfo.CurrentVersion(), info.Version, info.PlatformKey)
-	m.setState(StateDownloading, info, "")
-	m.emitState(StateDownloading, info, "", "", false, "")
-
-	archivePath, err := m.downloadUpdate(ctx, info)
-	if err != nil {
-		logger.Errorf("下载更新失败: %v", err)
-		m.setState(StateError, info, "")
-		m.emitError(info, err.Error(), manual)
-		return
-	}
-
-	m.setState(StateReady, info, archivePath)
-	m.emitState(StateReady, info, "", "", false, "")
+	m.setState(StateIdle, info, "")
 	m.emitReady(info, true)
 }
 

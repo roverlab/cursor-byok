@@ -1,5 +1,5 @@
 import { computed, reactive, watchSyncEffect } from "vue";
-import { Events } from "@wailsio/runtime";
+import { Browser, Events } from "@wailsio/runtime";
 import dayjs from "dayjs";
 import {
   checkForUpdates,
@@ -1043,13 +1043,13 @@ export const updateViewState = reactive({
   }),
   promptConfirmText: computed(() => {
     if (appState.updatePromptKind === "ready") {
-      return "立即重启更新";
+      return "前往下载";
     }
     return "确定";
   }),
   promptCancelText: computed(() => {
     if (appState.updatePromptKind === "ready") {
-      return "稍后";
+      return "关闭";
     }
     return "取消";
   }),
@@ -1417,17 +1417,15 @@ export async function confirmUpdatePrompt() {
     dismissUpdatePrompt();
     return;
   }
-  if (appState.updatePromptBusy) {
-    return;
-  }
-  appState.updatePromptBusy = true;
+  dismissUpdatePrompt();
   try {
-    await installReadyUpdate();
-  } catch (error) {
-    appState.updatePromptBusy = false;
-    const message = toUserError(error);
-    appState.updateError = message;
-    openUpdatePrompt("error", { error: message });
+    const version = appState.updateVersion ? `v${appState.updateVersion}` : "latest";
+    const releaseUrl = `https://github.com/roverlab/cursor-byok/releases/tag/${version}`;
+    await Browser.OpenURL(releaseUrl);
+  } catch (_error) {
+    try {
+      await Browser.OpenURL("https://github.com/roverlab/cursor-byok/releases");
+    } catch (_fallbackError) {}
   }
 }
 
